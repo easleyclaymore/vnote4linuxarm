@@ -1,4 +1,4 @@
-name: Build VNote ARM64 DEB
+name: Build VNote ARM64 DEB (Debian Trixie)
 
 # 触发条件：允许在 Actions 面板手动点击运行
 on:
@@ -6,10 +6,19 @@ on:
 
 jobs:
   build:
-    # 运行在原生的 ARM64 Ubuntu 24.04 环境上
+    # 物理机依然使用 ARM64 环境，保证编译速度
     runs-on: ubuntu-24.04-arm
     
+    # 【核心改动】直接启动一个纯净的 Debian 13 容器作为编译环境，对齐你的本地系统
+    container: debian:trixie
+    
     steps:
+      - name: Install Git for Checkout
+        run: |
+          apt-get update
+          # 在空容器中必须先装 git，否则下面的 checkout 代码拉取会失败
+          apt-get install -y git ca-certificates
+
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
@@ -18,16 +27,16 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          sudo apt-get update
-          # 安装编译工具链及 VNote 必需的 Qt6 依赖 (去掉了末尾报错的 cpack，因为 cmake 已自带)
-          sudo apt-get install -y build-essential cmake git ninja-build pkg-config \
+          apt-get update
+          # 安装编译工具链及 VNote 必需的 Qt6 依赖 (适配 Debian 源)
+          apt-get install -y build-essential cmake ninja-build pkg-config \
             qt6-base-dev qt6-webengine-dev qt6-svg-dev qt6-tools-dev qt6-tools-dev-tools \
             libqt6core5compat6-dev libqt6webchannel6-dev libgl1-mesa-dev rpm
             
       - name: Configure and Build
         run: |
           mkdir build && cd build
-          # 使用 CMake 配置项目，指定为 Release 版本和标准的 /usr 安装路径
+          # 使用 CMake 配置项目
           cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -GNinja
           # 执行编译
           ninja
@@ -35,12 +44,12 @@ jobs:
       - name: Package to DEB
         run: |
           cd build
-          # 调用 CPack 根据 CMakeLists 中的 install 规则生成 .deb 安装包
+          # 根据 Debian 环境自动生成正确的 deb 安装包
           cpack -G DEB
 
       - name: Upload DEB Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vnote-arm64-deb
+          name: vnote-arm64-deb-trixie
           path: build/*.deb
           retention-days: 7
