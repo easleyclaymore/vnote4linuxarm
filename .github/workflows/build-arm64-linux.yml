@@ -1,0 +1,147 @@
+# 工作流名称
+name: Build VNote ARM64 Linux DEB Package
+
+# 触发条件：手动触发（推荐）/推送到master分支/创建Release
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+  release:
+    types: [created]
+
+# 编译任务配置
+jobs:
+  build-deb:
+    # 指定GitHub托管的ARM64 Ubuntu运行器（22.04 LTS）
+    runs-on: ubuntu-22.04
+    architecture: arm64
+
+    steps:
+      # 步骤1：拉取源码（含子模块，VNote依赖子模块）
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0  # 拉取完整提交记录，用于版本号生成
+
+      # 步骤2：安装编译&打包依赖（ARM64版本）
+      - name: Install build dependencies
+        run: |
+          set -e  # 出错立即终止，便于排查
+          sudo apt update && sudo apt upgrade -y
+          # 核心编译依赖（Qt5+构建工具）
+          sudo apt install -y \
+            qtbase5-dev \
+            qttools5-dev \
+            qttools5-dev-tools \
+            libqt5svg5-dev \
+            cmake \
+            g++ \
+            libgl1-mesa-dev \
+            zlib1g-dev \
+            libssl-dev \
+            # deb打包依赖
+            debhelper \
+            dh-make \
+            fakeroot \
+            dpkg-dev \
+            pkg-config
+
+      # 步骤3：创建编译目录并配置CMake（移除无效参数）
+      - name: Configure CMake
+        run: |
+          set -e
+          mkdir -p build && cd build
+          # 仅保留有效参数，适配VNote官方CMake配置
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DUSE_QT5=ON
+
+      # 步骤4：编译源码
+      - name: Build VNote
+        run: |
+          set -e
+          cd build
+          make -j$(nproc)  # 最大化利用CPU核心加速编译
+
+      # 步骤5：准备deb打包目录结构（修复权限/版本号/依赖）
+      - name: Prepare DEB package structure
+        run: |
+          set -e
+          # 定义版本号（无tag时默认0.1.0，避免空值）
+          VNOTE_VERSION=$(git describe --tags --always --dirty=-dev | sed 's/^v//' || echo "0.1.0")
+          # 创建deb打包根目录
+          mkdir -p vnote-deb/DEBIAN vnote-deb/usr/share
+          
+          # 安装编译产物到打包目录（无需sudo，避免权限异常）
+          cd build
+          make install DESTDIR=../vnote-deb
+          
+          # 回到项目根目录
+          cd ..
+          # 复制桌面文件并设置权限
+          if [ -f "resources/vnote.desktop" ]; then
+            cp resources/vnote.desktop vnote-deb/usr/share/applications/
+            chmod 644 vnote-deb/usr/share/applications/vnote.desktop
+          fi
+          # 复制图标并设置权限
+          if [ -f "resources/icons/vnote.svg" ]; then
+            mkdir -p vnote-deb/usr/share/icons/hicolor/scalable/apps/
+            cp resources/icons/vnote.svg vnote-deb/usr/share/icons/hicolor/scalable/apps/
+            chmod 644 vnote-deb/usr/share/icons/hicolor/scalable/apps/vnote.svg
+          fi
+          
+          # 生成标准DEB控制文件（优化依赖写法，适配多发行版）
+          cat > vnote-deb/DEBIAN/control << EOF
+          Package: vnote
+          Version: ${VNOTE_VERSION}
+          Architecture: arm64
+          Maintainer: Your Name <your-email@example.com>  # 可替换为你的信息
+          Section: utils
+          Priority: optional
+          # 依赖写法优化：>=版本下限 + 兼容不同发行版
+          Depends: libqt5core5a (>= 5.15.0), libqt5gui5 (>= 5.15.0) | libqt5gui5-gles (>= 5.15.0), 
+                   libqt5widgets5 (>= 5.15.0), libqt5svg5 (>= 5.15.0), libqt5network5 (>= 5.15.0),
+                   libc6 (>= 2.34), libgcc-s1 (>= 11.2.0), libstdc++6 (>= 11.2.0), zlib1g (>= 1.2.11)
+          Description: A pleasant note-taking platform on Linux.
+           VNote is a powerful and user-friendly note-taking application
+           focused on Markdown editing and management.
+          EOF
+
+          # 设置deb目录权限（仅DEBIAN目录需执行权限）
+          chown -R $USER:$USER vnote-deb/  # 用当前用户而非root，避免权限冲突
+          chmod 755 vnote-deb/DEBIAN
+          chmod 644 vnote-deb/DEBIAN/control
+
+      # 步骤6：构建deb包（fakeroot模拟root，保证包内权限正确）
+      - name: Build DEB package
+        run: |
+          set -e
+          # 生成deb包（命名包含版本号，便于区分）
+          VNOTE_VERSION=$(git describe --tags --always --dirty=-dev | sed 's/^v//' || echo "0.1.0")
+          fakeroot dpkg-deb --build vnote-deb ./vnote-${VNOTE_VERSION}-arm64.deb
+          
+          # 验证deb包完整性（输出包信息，便于排查）
+          echo "=== DEB Package Info ==="
+          dpkg-deb -I ./vnote-${VNOTE_VERSION}-arm64.deb
+          echo "=== DEB Package Contents ==="
+          dpkg-deb -c ./vnote-${VNOTE_VERSION}-arm64.deb
+
+      # 步骤7：上传deb包作为产物（可在Actions页面下载）
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnote-arm64-linux-deb
+          # 匹配所有arm64 deb包，避免版本号变化导致路径失效
+          path: ./vnote-*-arm64.deb
+          retention-days: 90  # 产物保留90天
+
+      # 可选步骤：若创建Release，自动将deb包附加到Release
+      - name: Upload DEB to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./vnote-*-arm64.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
